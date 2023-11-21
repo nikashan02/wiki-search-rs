@@ -2,7 +2,7 @@ pub mod index_engine;
 
 use clap::Parser;
 
-use crate::index_engine::build_index;
+use index_engine::index_engine::build_index;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -14,7 +14,7 @@ struct Args {
     #[arg(short, long)]
     wiki_dump_path: Option<String>,
     #[arg(short, long)]
-    metadata_output_path: Option<String>,
+    output_path: Option<String>,
 }
 
 #[tokio::main]
@@ -29,14 +29,14 @@ async fn main() {
         }
         let wiki_dump_path = wiki_dump_path.unwrap();
 
-        let metadata_output_path = args.metadata_output_path;
-        if metadata_output_path.is_none() {
-            println!("metadata-output-path is required to build index");
+        let output_path = args.output_path;
+        if output_path.is_none() {
+            println!("output-path is required to build index");
             return;
         }
-        let metadata_output_path = metadata_output_path.unwrap();
+        let output_path = output_path.unwrap();
 
-        match build_index(wiki_dump_path, metadata_output_path).await {
+        match build_index(&wiki_dump_path, &output_path).await {
             Ok(num_articles) => {
                 println!("Index built with {} articles", num_articles);
             }

@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 bzip2 = "0.4.4"
 clap = { version = "4.4.8", features = ["derive"] }
+rust-stemmers = "1.2.0"
 tokio = { version = "1.34.0", features = ["full"] }
 xml-rs = "0.8.19"
