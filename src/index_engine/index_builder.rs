@@ -6,10 +6,10 @@ use super::index_engine::{execute_with_retry, get_connection, Article};
 
 #[derive(Default)]
 pub struct IndexBuilder {
-    cur_token_id: u32,
-    id_to_token: HashMap<u32, String>,
-    token_to_id: HashMap<String, u32>,
-    inv_index: HashMap<u32, HashMap<u32, u32>>,
+    cur_token_id: i32,
+    id_to_token: HashMap<i32, String>,
+    token_to_id: HashMap<String, i32>,
+    inv_index: HashMap<i32, HashMap<i32, i32>>,
 }
 
 impl IndexBuilder {
@@ -17,23 +17,23 @@ impl IndexBuilder {
         IndexBuilder::default()
     }
 
-    pub fn build_index(&mut self, article: &Article) -> Result<(), String> {
+    pub fn build_index(&mut self, article: &Article) -> Result<i32, String> {
         let tokens = tokenize(&article.text);
         let token_ids = self.get_token_ids(&tokens);
         let word_counts = self.count_words(&token_ids);
         self.update_inv_index(article.id, &word_counts);
-        Ok(())
+        Ok(tokens.len() as i32)
     }
 
     pub async fn write_lexicon(
         &self,
         db_connection_pool: deadpool_postgres::Pool,
     ) -> Result<(), String> {
-        let mut connection = get_connection(db_connection_pool).await?;
+        let mut connection = get_connection(&db_connection_pool).await?;
 
         for (token_id, token) in &self.id_to_token {
             let query = format!(
-                "INSERT INTO lexicon (id, token) VALUES ({}, '{}')",
+                "INSERT INTO lexicon (token_id, token) VALUES ({}, '{}')",
                 token_id, token
             );
             execute_with_retry(&mut connection, &query, &[])
@@ -48,7 +48,7 @@ impl IndexBuilder {
         &self,
         db_connection_pool: deadpool_postgres::Pool,
     ) -> Result<(), String> {
-        let mut connection = get_connection(db_connection_pool).await?;
+        let mut connection = get_connection(&db_connection_pool).await?;
 
         for (token_id, token_inv_index) in &self.inv_index {
             for (article_id, count) in token_inv_index {
@@ -65,7 +65,7 @@ impl IndexBuilder {
         Ok(())
     }
 
-    fn get_token_ids(&mut self, tokens: &Vec<String>) -> Vec<u32> {
+    fn get_token_ids(&mut self, tokens: &Vec<String>) -> Vec<i32> {
         let mut token_ids = Vec::new();
         for token in tokens {
             token_ids.push(self.get_token_id(token));
@@ -73,7 +73,7 @@ impl IndexBuilder {
         token_ids
     }
 
-    fn get_token_id(&mut self, token: &String) -> u32 {
+    fn get_token_id(&mut self, token: &String) -> i32 {
         match self.token_to_id.get(token) {
             Some(token_id) => *token_id,
             None => {
@@ -86,8 +86,8 @@ impl IndexBuilder {
         }
     }
 
-    fn count_words(&self, token_ids: &Vec<u32>) -> HashMap<u32, u32> {
-        let mut word_counts = HashMap::<u32, u32>::new();
+    fn count_words(&self, token_ids: &Vec<i32>) -> HashMap<i32, i32> {
+        let mut word_counts = HashMap::<i32, i32>::new();
         for token_id in token_ids {
             let count = word_counts.entry(*token_id).or_insert(0);
             *count += 1;
@@ -95,7 +95,7 @@ impl IndexBuilder {
         word_counts
     }
 
-    fn update_inv_index(&mut self, article_id: u32, word_counts: &HashMap<u32, u32>) {
+    fn update_inv_index(&mut self, article_id: i32, word_counts: &HashMap<i32, i32>) {
         for (token_id, count) in word_counts {
             let token_inv_index = self.inv_index.entry(*token_id).or_insert(HashMap::new());
             token_inv_index.insert(article_id, *count);
@@ -106,7 +106,7 @@ impl IndexBuilder {
 fn tokenize(text: &String) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut start = 0;
-    let text = text.to_lowercase();
+    let text = text.to_lowercase().replace(|c: char| !c.is_ascii(), ""); // non-ascii chars were making things wonky
     let stemmer = Stemmer::create(rust_stemmers::Algorithm::English);
 
     for (i, c) in text.chars().enumerate() {

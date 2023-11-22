@@ -11,7 +11,7 @@ use super::{
     snippet_engine::{self, SnippetEngine},
 };
 
-pub const QUERY_RETRY_LIMIT: u32 = 10;
+pub const QUERY_RETRY_LIMIT: i8 = 10;
 
 enum Tag {
     Title,
@@ -22,7 +22,7 @@ enum Tag {
 
 #[derive(Debug, Clone)]
 pub struct Article {
-    pub id: u32,
+    pub id: i32,
     pub title: String,
     pub text: String,
 }
@@ -31,13 +31,13 @@ impl Article {
     fn new() -> Self {
         Article {
             title: String::new(),
-            id: u32::MAX,
+            id: i32::MAX,
             text: String::new(),
         }
     }
 
     fn parsed_id(&self) -> bool {
-        self.id != u32::MAX
+        self.id != i32::MAX
     }
 }
 
@@ -107,8 +107,8 @@ async fn parse_dump(
                     {
                         eprintln!("Error indexing article {}: {}", cur_article.id, e);
                     }
-                    if cur_article.id == 10000 {
-                        // Limit to first 10k articles for now... :/
+                    if article_count >= 100 {
+                        // Limit to first 100 articles for now... :/
                         break;
                     }
                     cur_article = Article::new();
@@ -120,7 +120,7 @@ async fn parse_dump(
                 }
                 Tag::Id => {
                     if !cur_article.parsed_id() {
-                        cur_article.id = chars.parse::<u32>().unwrap();
+                        cur_article.id = chars.parse::<i32>().unwrap();
                     }
                 }
                 Tag::Text => {
@@ -208,13 +208,21 @@ async fn index_article(
     index_builder: Arc<Mutex<IndexBuilder>>,
     snippet_engine: SnippetEngine,
 ) -> Result<(), String> {
-    if let Err(e) = snippet_engine.insert_article(&article).await {
-        return Err(format!("Error inserting article: {}", e));
-    }
+    snippet_engine
+        .insert_article(&article)
+        .await
+        .map_err(|e| format!("Error inserting article: {e}"))?;
 
-    if let Err(e) = index_builder.lock().await.build_index(&article) {
-        return Err(format!("Error building index: {}", e));
-    }
+    let length = index_builder
+        .lock()
+        .await
+        .build_index(&article)
+        .map_err(|e| format!("Error building index: {}", e))?;
+
+    snippet_engine
+        .update_length(article.id, length)
+        .await
+        .map_err(|e| format!("Error updating length: {e}"))?;
 
     Ok(())
 }
@@ -228,8 +236,8 @@ async fn prepare_db(db_connection_pool: Pool) -> Result<(), String> {
             "CREATE TABLE IF NOT EXISTS articles (
                 article_id INT PRIMARY KEY,
                 title TEXT NOT NULL,
-                text MEDIUMTEXT NOT NULL
-                length INT NOT NULL,
+                text TEXT NOT NULL,
+                length INT NOT NULL
             )",
             &[],
         )
@@ -241,7 +249,7 @@ async fn prepare_db(db_connection_pool: Pool) -> Result<(), String> {
         .execute(
             "CREATE TABLE IF NOT EXISTS lexicon (
                 token_id INT PRIMARY KEY,
-                token VARCHAR(255) NOT NULL,
+                token TEXT NOT NULL
             )",
             &[],
         )
@@ -257,7 +265,7 @@ async fn prepare_db(db_connection_pool: Pool) -> Result<(), String> {
                 count INT NOT NULL,
                 PRIMARY KEY (token_id, article_id),
                 FOREIGN KEY (token_id) REFERENCES lexicon(token_id),
-                FOREIGN KEY (article_id) REFERENCES articles(article_id),
+                FOREIGN KEY (article_id) REFERENCES articles(article_id)
             )",
             &[],
         )

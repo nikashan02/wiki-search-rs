@@ -14,15 +14,15 @@ struct Args {
     search: Option<String>,
     #[arg(short, long)]
     wiki_dump_path: Option<String>,
-    #[arg(short, long)]
+    #[arg(long)]
     db_host: String,
-    #[arg(short, long)]
+    #[arg(long)]
     db_port: u16,
-    #[arg(short, long)]
+    #[arg(long)]
     db_user: String,
-    #[arg(short, long)]
+    #[arg(long)]
     db_password: String,
-    #[arg(short, long)]
+    #[arg(long)]
     db_name: String,
 }
 
