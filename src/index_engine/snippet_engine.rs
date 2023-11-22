@@ -1,18 +1,46 @@
-use tokio::fs::File;
-use tokio::io::{self, AsyncWriteExt};
+use deadpool_postgres::Pool;
+use postgres::Statement;
 
-use super::index_engine::Article;
+use super::index_engine::{execute_with_retry, get_connection, Article};
 
-pub async fn snippet_engine(article: &Article, output_path: &String) -> io::Result<()> {
-    let snippet_file_path = format!("{}/{}.txt", output_path, article.id);
-    let mut snippet_file = File::create(snippet_file_path).await?;
-    let text = article.text.as_bytes();
-    let mut pos = 0;
+#[derive(Clone)]
+pub struct SnippetEngine {
+    pub db_connection_pool: Pool,
+    pub insert_article_statement: Statement,
+}
 
-    while pos < text.len() {
-        let bytes_written = snippet_file.write(&text[pos..]).await?;
-        pos += bytes_written;
+impl SnippetEngine {
+    pub async fn new(db_connection_pool: Pool) -> Result<Self, String> {
+        let connection = get_connection(&db_connection_pool).await?;
+
+        // not sure if preparing the statment beforehand improved performance...
+        let insert_article_statement = match connection
+            .prepare("INSERT INTO articles (id, title, text) VALUES ($1, $2, $3)")
+            .await
+        {
+            Ok(query) => query,
+            Err(e) => return Err(format!("Error preparing insert statement: {}", e)),
+        };
+
+        Ok(SnippetEngine {
+            db_connection_pool,
+            insert_article_statement,
+        })
     }
 
-    Ok(())
+    pub async fn insert_article(&self, article: &Article) -> Result<(), String> {
+        let mut connection = get_connection(&self.db_connection_pool)
+            .await
+            .map_err(|e: String| format!("Error inserting article: {e}"))?;
+
+        execute_with_retry(
+            &mut connection,
+            &self.insert_article_statement,
+            &[&article.id, &article.title, &article.text],
+        )
+        .await
+        .map_err(|e| format!("Error inserting article: {e}"))?;
+
+        Ok(())
+    }
 }
