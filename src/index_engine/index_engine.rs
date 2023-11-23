@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use bzip2::read::MultiBzDecoder;
-use deadpool_postgres::{Client, Pool, Runtime};
-use postgres::{error::SqlState, NoTls};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use xml::reader::{EventReader, XmlEvent};
 
-use super::{index_builder::IndexBuilder, snippet_engine::SnippetEngine};
+use super::{index_builder::IndexBuilder, snippet_engine};
 
 pub const QUERY_RETRY_LIMIT: i8 = 10;
 const MAX_TASKS: usize = 50;
@@ -20,7 +19,7 @@ enum Tag {
     Other,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Article {
     pub id: i32,
     pub title: String,
@@ -41,16 +40,12 @@ impl Article {
     }
 }
 
-pub async fn build_index(
-    wiki_dump_path: &String,
-    db_config: &deadpool_postgres::Config,
-    inverted_index_path: &String,
-) -> Result<usize, String> {
+pub async fn build_index(wiki_dump_path: &String, index_path: &String) -> Result<usize, String> {
     let mut wiki_dump_file = std::fs::File::open(wiki_dump_path).unwrap();
     let mut reader = MultiBzDecoder::new(&mut wiki_dump_file);
     let parser = EventReader::new(&mut reader);
 
-    match parse_dump(parser, db_config, inverted_index_path).await {
+    match parse_dump(parser, index_path).await {
         Err(e) => Err(format!("Error parsing dump: {}", e)),
         Ok(article_count) => Ok(article_count),
     }
@@ -58,29 +53,14 @@ pub async fn build_index(
 
 async fn parse_dump(
     parser: EventReader<&mut MultiBzDecoder<&mut std::fs::File>>,
-    db_config: &deadpool_postgres::Config,
-    inverted_index_path: &String,
+    index_path: &String,
 ) -> Result<usize, String> {
-    let db_connection_pool = match create_pool(db_config).map_err(|err| err.to_string()) {
-        Ok(pool) => pool,
-        Err(e) => return Err(format!("Error creating DB connection pool: {}", e)),
-    };
-
-    prepare_db(db_connection_pool.clone())
-        .await
-        .map_err(|e| format! {"Error preparing DB: {e}"})?;
-
     let mut cur_tag = Tag::Other;
     let mut cur_article = Article::new();
 
     let index_builder = Arc::new(Mutex::new(
-        IndexBuilder::new(inverted_index_path)
-            .map_err(|e| format! {"Error creating index builder: {e}"})?,
+        IndexBuilder::new(index_path).map_err(|e| format! {"Error creating index builder: {e}"})?,
     ));
-
-    let snippet_engine = SnippetEngine::new(db_connection_pool.clone())
-        .await
-        .map_err(|e| format! {"Error creating snippet engine: {e}"})?;
 
     let mut article_count = 0;
     let mut tasks = Vec::new();
@@ -109,8 +89,8 @@ async fn parse_dump(
                     tasks.push(index_article(
                         // All these clones are fairly cheap
                         cur_article.clone(),
+                        index_path.clone(),
                         index_builder.clone(),
-                        snippet_engine.clone(),
                     ));
 
                     // Don't want to use up too much memory
@@ -163,7 +143,7 @@ async fn parse_dump(
     index_builder
         .lock()
         .await
-        .write_lexicon(db_connection_pool.clone())
+        .write_lexicon()
         .await
         .map_err(|e| format!("Error writing lexicon: {}", e))?;
 
@@ -175,109 +155,29 @@ async fn parse_dump(
         .update_all_inv_index_files()
         .map_err(|e| format!("Error updating inverted index files: {}", e))?;
 
-    Ok(article_count)
-}
+    println!("Wrote inverted index files");
 
-pub fn create_pool(db_config: &deadpool_postgres::Config) -> Result<Pool, String> {
-    Ok(db_config
-        .create_pool(Some(Runtime::Tokio1), NoTls)
-        .map_err(|err| err.to_string())?)
-}
-
-pub async fn get_connection(pool: &Pool) -> Result<Client, String> {
-    pool.get()
+    index_builder
+        .lock()
         .await
-        .map_err(|e| format!("Error getting connection: {}", e))
-}
+        .write_doc_lengths()
+        .map_err(|e| format!("Error writing doc lengths: {}", e))?;
 
-pub fn should_retry(sql_error: &postgres::Error) -> bool {
-    sql_error
-        .code()
-        .map(|e| *e == SqlState::T_R_SERIALIZATION_FAILURE || *e == SqlState::T_R_DEADLOCK_DETECTED)
-        .unwrap_or(false)
-}
+    println!("Wrote doc lengths");
 
-pub async fn execute_with_retry<T: ?Sized + postgres::ToStatement>(
-    connection: &mut Client,
-    query: &T,
-    params: &[&(dyn postgres::types::ToSql + Sync)],
-) -> Result<u64, String> {
-    for _ in 0..QUERY_RETRY_LIMIT {
-        let transaction = connection.transaction().await.map_err(|e| e.to_string())?;
-        let result = transaction.execute(query, params).await;
-        let result_commit = transaction.commit().await;
-
-        if result_commit.is_err() && result_commit.map_err(|e| should_retry(&e)).unwrap_err() {
-            continue;
-        }
-
-        match result {
-            Ok(num_rows) => return Ok(num_rows),
-            Err(e) => {
-                if should_retry(&e) {
-                    continue;
-                } else {
-                    return Err(format!("Error executing query: {}", e));
-                }
-            }
-        }
-    }
-
-    return Err(format!("Error executing query: Reached retry limit"));
+    Ok(article_count)
 }
 
 async fn index_article(
     article: Article,
+    index_path: String,
     index_builder: Arc<Mutex<IndexBuilder>>,
-    snippet_engine: SnippetEngine,
 ) -> Result<(), String> {
-    snippet_engine
-        .insert_article(&article)
+    snippet_engine::insert_article(&article, &index_path)
         .await
         .map_err(|e| format!("Error inserting article: {e}"))?;
 
-    let length = index_builder
-        .lock()
-        .await
-        .build_index(&article)
-        .map_err(|e| format!("Error building index: {e}"))?;
-
-    snippet_engine
-        .update_length(article.id, length)
-        .await
-        .map_err(|e| format!("Error updating length: {e}"))?;
-
-    Ok(())
-}
-
-async fn prepare_db(db_connection_pool: Pool) -> Result<(), String> {
-    let connection = get_connection(&db_connection_pool).await?;
-
-    // create articles table
-    connection
-        .execute(
-            "CREATE TABLE IF NOT EXISTS articles (
-                article_id INT PRIMARY KEY,
-                title TEXT NOT NULL,
-                text TEXT NOT NULL,
-                length INT NOT NULL
-            )",
-            &[],
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-
-    // create lexicon table
-    connection
-        .execute(
-            "CREATE TABLE IF NOT EXISTS lexicon (
-                token_id INT PRIMARY KEY,
-                token TEXT NOT NULL
-            )",
-            &[],
-        )
-        .await
-        .map_err(|err| err.to_string())?;
+    index_builder.lock().await.build_index(&article);
 
     Ok(())
 }

@@ -1,4 +1,4 @@
 *.bz2
 .vscode
 target/
-inv_index/
+wiki_index/
