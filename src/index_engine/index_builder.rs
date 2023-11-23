@@ -1,20 +1,35 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write};
 
 use rust_stemmers::Stemmer;
 
 use super::index_engine::{execute_with_retry, get_connection, Article};
 
-#[derive(Default)]
+const MAX_POSTINGS_LIST_SIZE: usize = 10000;
+const MAX_POSTINGS_LIST_DIRECTORY_SIZE: i32 = 1000;
+
 pub struct IndexBuilder {
     cur_token_id: i32,
     id_to_token: HashMap<i32, String>,
     token_to_id: HashMap<String, i32>,
-    inv_index: HashMap<i32, HashMap<i32, i32>>,
+    inv_index_path: String,
+    inv_index: HashMap<i32, Vec<(i32, i32)>>,
 }
 
 impl IndexBuilder {
-    pub fn new() -> Self {
-        IndexBuilder::default()
+    pub fn new(inverted_index_path: &String) -> Result<Self, String> {
+        if std::path::Path::new(&inverted_index_path).exists() {
+            std::fs::remove_dir_all(&inverted_index_path)
+                .map_err(|e| format!("Error removing existing inverted index directory: {e}"))?;
+        }
+        std::fs::create_dir_all(&inverted_index_path)
+            .map_err(|e| format!("Error creating inverted index directory: {e}"))?;
+        Ok(IndexBuilder {
+            cur_token_id: 0,
+            id_to_token: HashMap::new(),
+            token_to_id: HashMap::new(),
+            inv_index_path: inverted_index_path.clone(),
+            inv_index: HashMap::new(),
+        })
     }
 
     pub fn build_index(&mut self, article: &Article) -> Result<i32, String> {
@@ -44,24 +59,12 @@ impl IndexBuilder {
         Ok(())
     }
 
-    pub async fn write_inverted_index(
-        &self,
-        db_connection_pool: deadpool_postgres::Pool,
-    ) -> Result<(), String> {
-        let mut connection = get_connection(&db_connection_pool).await?;
-
-        for (token_id, token_inv_index) in &self.inv_index {
-            for (article_id, count) in token_inv_index {
-                let query = format!(
-                    "INSERT INTO inverted_index (token_id, article_id, count) VALUES ({}, {}, {})",
-                    token_id, article_id, count
-                );
-                execute_with_retry(&mut connection, &query, &[])
-                    .await
-                    .map_err(|e| format!("Error inserting into inverted_index: {e}",))?;
-            }
+    pub fn update_all_inv_index_files(&mut self) -> Result<(), String> {
+        let token_ids = self.inv_index.keys().copied().collect::<Vec<i32>>(); // Create a copy of the token IDs
+        for token_id in token_ids {
+            self.update_inv_index_file(token_id)
+                .map_err(|e| format!("Error updating inverted index file: {e}"))?;
         }
-
         Ok(())
     }
 
@@ -97,9 +100,47 @@ impl IndexBuilder {
 
     fn update_inv_index(&mut self, article_id: i32, word_counts: &HashMap<i32, i32>) {
         for (token_id, count) in word_counts {
-            let token_inv_index = self.inv_index.entry(*token_id).or_insert(HashMap::new());
-            token_inv_index.insert(article_id, *count);
+            let token_postings_list = self.inv_index.entry(*token_id).or_insert(Vec::new());
+            token_postings_list.push((article_id, *count));
+            if token_postings_list.len() >= MAX_POSTINGS_LIST_SIZE {
+                if let Err(e) = self.update_inv_index_file(*token_id) {
+                    eprintln!("Error updating inverted index file: {}", e);
+                }
+            }
         }
+    }
+
+    fn update_inv_index_file(&mut self, token_id: i32) -> Result<(), String> {
+        let subdir = format!(
+            "{}/{}",
+            self.inv_index_path,
+            token_id / MAX_POSTINGS_LIST_DIRECTORY_SIZE
+        );
+        std::fs::create_dir_all(&subdir)
+            .map_err(|e| format!("Error creating subdirectory at {subdir}: {e}"))?;
+
+        let token_postings_list = self
+            .inv_index
+            .get(&token_id)
+            .ok_or(format!("Token ID {token_id} not found in inverted index"))?;
+        let postings_list_string = token_postings_list
+            .iter()
+            .map(|(article_id, count)| format!("{} {}", article_id, count))
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(format!("{subdir}/{token_id}"))
+            .map_err(|e| format!("Error opening file: {e}"))?;
+        file.write_all(postings_list_string.as_bytes())
+            .map_err(|e| format!("Error writing to file: {e}"))?;
+
+        // Clear postings list
+        self.inv_index.insert(token_id, Vec::new());
+
+        Ok(())
     }
 }
 

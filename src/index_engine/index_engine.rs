@@ -6,12 +6,12 @@ use postgres::{error::SqlState, NoTls};
 use tokio::sync::Mutex;
 use xml::reader::{EventReader, XmlEvent};
 
-use super::{
-    index_builder::{self, IndexBuilder},
-    snippet_engine::{self, SnippetEngine},
-};
+use super::{index_builder::IndexBuilder, snippet_engine::SnippetEngine};
 
 pub const QUERY_RETRY_LIMIT: i8 = 10;
+const MAX_TASKS: usize = 50;
+// Limit to the first 1000 articles for now... :/
+const MAX_ARTICLES: usize = 1000;
 
 enum Tag {
     Title,
@@ -44,12 +44,13 @@ impl Article {
 pub async fn build_index(
     wiki_dump_path: &String,
     db_config: &deadpool_postgres::Config,
+    inverted_index_path: &String,
 ) -> Result<usize, String> {
     let mut wiki_dump_file = std::fs::File::open(wiki_dump_path).unwrap();
     let mut reader = MultiBzDecoder::new(&mut wiki_dump_file);
     let parser = EventReader::new(&mut reader);
 
-    match parse_dump(parser, db_config).await {
+    match parse_dump(parser, db_config, inverted_index_path).await {
         Err(e) => Err(format!("Error parsing dump: {}", e)),
         Ok(article_count) => Ok(article_count),
     }
@@ -58,6 +59,7 @@ pub async fn build_index(
 async fn parse_dump(
     parser: EventReader<&mut MultiBzDecoder<&mut std::fs::File>>,
     db_config: &deadpool_postgres::Config,
+    inverted_index_path: &String,
 ) -> Result<usize, String> {
     let db_connection_pool = match create_pool(db_config).map_err(|err| err.to_string()) {
         Ok(pool) => pool,
@@ -70,12 +72,18 @@ async fn parse_dump(
 
     let mut cur_tag = Tag::Other;
     let mut cur_article = Article::new();
-    let index_builder = Arc::new(Mutex::new(index_builder::IndexBuilder::new()));
-    let snippet_engine = snippet_engine::SnippetEngine::new(db_connection_pool.clone())
+
+    let index_builder = Arc::new(Mutex::new(
+        IndexBuilder::new(inverted_index_path)
+            .map_err(|e| format! {"Error creating index builder: {e}"})?,
+    ));
+
+    let snippet_engine = SnippetEngine::new(db_connection_pool.clone())
         .await
         .map_err(|e| format! {"Error creating snippet engine: {e}"})?;
 
     let mut article_count = 0;
+    let mut tasks = Vec::new();
 
     // Let's parse the dump by streaming it (StAX) instead of loading it all into memory (DOM)
     // xml-rs does StAX out of the box so we're chilling
@@ -97,18 +105,24 @@ async fn parse_dump(
                 cur_tag = Tag::Other;
                 if name.local_name.as_str() == "page" {
                     article_count += 1;
-                    if let Err(e) = index_article(
+
+                    tasks.push(index_article(
                         // All these clones are fairly cheap
                         cur_article.clone(),
                         index_builder.clone(),
                         snippet_engine.clone(),
-                    )
-                    .await
-                    {
-                        eprintln!("Error indexing article {}: {}", cur_article.id, e);
+                    ));
+
+                    // Don't want to use up too much memory
+                    if tasks.len() >= MAX_TASKS {
+                        while let Some(task) = tasks.pop() {
+                            if let Err(e) = task.await {
+                                eprintln!("Error indexing article: {}", e);
+                            }
+                        }
                     }
-                    if article_count >= 100 {
-                        // Limit to first 100 articles for now... :/
+
+                    if article_count >= MAX_ARTICLES {
                         break;
                     }
                     cur_article = Article::new();
@@ -138,6 +152,14 @@ async fn parse_dump(
         }
     }
 
+    while let Some(task) = tasks.pop() {
+        if let Err(e) = task.await {
+            eprintln!("Error indexing article: {}", e);
+        }
+    }
+
+    println!("Indexed {} articles", article_count);
+
     index_builder
         .lock()
         .await
@@ -145,12 +167,13 @@ async fn parse_dump(
         .await
         .map_err(|e| format!("Error writing lexicon: {}", e))?;
 
+    println!("Wrote lexicon");
+
     index_builder
         .lock()
         .await
-        .write_inverted_index(db_connection_pool)
-        .await
-        .map_err(|e| format!("Error writing inverted index: {e}"))?;
+        .update_all_inv_index_files()
+        .map_err(|e| format!("Error updating inverted index files: {}", e))?;
 
     Ok(article_count)
 }
@@ -217,7 +240,7 @@ async fn index_article(
         .lock()
         .await
         .build_index(&article)
-        .map_err(|e| format!("Error building index: {}", e))?;
+        .map_err(|e| format!("Error building index: {e}"))?;
 
     snippet_engine
         .update_length(article.id, length)
@@ -250,22 +273,6 @@ async fn prepare_db(db_connection_pool: Pool) -> Result<(), String> {
             "CREATE TABLE IF NOT EXISTS lexicon (
                 token_id INT PRIMARY KEY,
                 token TEXT NOT NULL
-            )",
-            &[],
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-
-    // create inverted index table
-    connection
-        .execute(
-            "CREATE TABLE IF NOT EXISTS inverted_index (
-                token_id INT NOT NULL,
-                article_id INT NOT NULL,
-                count INT NOT NULL,
-                PRIMARY KEY (token_id, article_id),
-                FOREIGN KEY (token_id) REFERENCES lexicon(token_id),
-                FOREIGN KEY (article_id) REFERENCES articles(article_id)
             )",
             &[],
         )

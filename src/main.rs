@@ -14,6 +14,8 @@ struct Args {
     search: Option<String>,
     #[arg(short, long)]
     wiki_dump_path: Option<String>,
+    #[arg(short, long)]
+    inverted_index_path: String,
     #[arg(long)]
     db_host: String,
     #[arg(long)]
@@ -56,7 +58,9 @@ async fn main() {
         }
         let wiki_dump_path = wiki_dump_path.unwrap();
 
-        match build_index(&wiki_dump_path, &db_config).await {
+        let inverted_index_path = args.inverted_index_path;
+
+        match build_index(&wiki_dump_path, &db_config, &inverted_index_path).await {
             Ok(num_articles) => {
                 println!("Index built with {} articles", num_articles);
             }
