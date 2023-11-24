@@ -5,9 +5,10 @@ A search engine for Wikipedia written entirely in Rust.
 ## Features
 
 - Full text search
-- Stream XML proccessing
 - [Okapi BM25](https://en.wikipedia.org/wiki/Okapi_BM25) ranking model
 - Article snippets in results
+- Stream XML proccessing
+- Concurrent indexing
 
 Coming soon:
 
