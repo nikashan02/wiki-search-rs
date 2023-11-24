@@ -42,10 +42,6 @@ impl IndexBuilder {
             .open(&lexicon_path)
             .map_err(|e| format!("Error opening file: {e}"))?;
 
-        // Serde lexicon to json
-        // serde_json::to_writer(&mut file, &self.id_to_token)
-        //     .map_err(|e| format!("Error writing to lexicon file: {e}"))?;
-
         bincode::serialize_into(&mut file, &self.id_to_token)
             .map_err(|e| format!("Error writing to lexicon file: {e}"))?;
 
