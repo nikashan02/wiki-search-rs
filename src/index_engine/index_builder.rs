@@ -1,27 +1,18 @@
 use std::{collections::HashMap, io::Write, path::Path};
 
-use rust_stemmers::Stemmer;
-
-use super::index_engine::Article;
-
-const MAX_POSTINGS_LIST_SIZE: usize = 10000;
-const MAX_POSTINGS_LIST_DIRECTORY_SIZE: i32 = 1000;
+use crate::common::{tokenize, Article, MAX_POSTINGS_LIST_DIRECTORY_SIZE, MAX_POSTINGS_LIST_SIZE};
 
 pub struct IndexBuilder {
-    cur_token_id: i32,
-    id_to_token: HashMap<i32, String>,
-    token_to_id: HashMap<String, i32>,
+    cur_token_id: usize,
+    id_to_token: HashMap<usize, String>,
+    token_to_id: HashMap<String, usize>,
     index_path: String,
-    inv_index: HashMap<i32, Vec<(i32, i32)>>,
-    doc_lengths: HashMap<i32, i32>,
+    inv_index: HashMap<usize, Vec<(usize, usize)>>,
+    article_lengths: HashMap<usize, usize>,
 }
 
 impl IndexBuilder {
     pub fn new(index_path: &String) -> Result<Self, String> {
-        if std::path::Path::new(&index_path).exists() {
-            std::fs::remove_dir_all(&index_path)
-                .map_err(|e| format!("Error removing existing index directory: {e}"))?;
-        }
         std::fs::create_dir_all(&index_path)
             .map_err(|e| format!("Error creating index directory: {e}"))?;
 
@@ -31,7 +22,7 @@ impl IndexBuilder {
             token_to_id: HashMap::new(),
             index_path: index_path.clone(),
             inv_index: HashMap::new(),
-            doc_lengths: HashMap::new(),
+            article_lengths: HashMap::new(),
         })
     }
 
@@ -40,11 +31,11 @@ impl IndexBuilder {
         let token_ids = self.get_token_ids(&tokens);
         let word_counts = self.count_words(&token_ids);
         self.update_inv_index(article.id, &word_counts);
-        self.doc_lengths.insert(article.id, tokens.len() as i32);
+        self.article_lengths.insert(article.id, tokens.len());
     }
 
     pub async fn write_lexicon(&self) -> Result<(), String> {
-        let lexicon_path = Path::new(&self.index_path).join("lexicon.json");
+        let lexicon_path = Path::new(&self.index_path).join("lexicon.bin");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -52,14 +43,17 @@ impl IndexBuilder {
             .map_err(|e| format!("Error opening file: {e}"))?;
 
         // Serde lexicon to json
-        serde_json::to_writer(&mut file, &self.id_to_token)
+        // serde_json::to_writer(&mut file, &self.id_to_token)
+        //     .map_err(|e| format!("Error writing to lexicon file: {e}"))?;
+
+        bincode::serialize_into(&mut file, &self.id_to_token)
             .map_err(|e| format!("Error writing to lexicon file: {e}"))?;
 
         Ok(())
     }
 
     pub fn update_all_inv_index_files(&mut self) -> Result<(), String> {
-        let token_ids = self.inv_index.keys().copied().collect::<Vec<i32>>(); // Create a copy of the token IDs
+        let token_ids = self.inv_index.keys().copied().collect::<Vec<usize>>(); // Create a copy of the token IDs
         for token_id in token_ids {
             self.update_inv_index_file(token_id)
                 .map_err(|e| format!("Error updating inverted index file: {e}"))?;
@@ -67,21 +61,21 @@ impl IndexBuilder {
         Ok(())
     }
 
-    pub fn write_doc_lengths(&self) -> Result<(), String> {
-        let doc_lengths_path = Path::new(&self.index_path).join("doc_lengths.json");
+    pub fn write_article_lengths(&self) -> Result<(), String> {
+        let article_lengths_path = Path::new(&self.index_path).join("article_lengths.bin");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .open(&doc_lengths_path)
+            .open(&article_lengths_path)
             .map_err(|e| format!("Error opening file: {e}"))?;
 
-        serde_json::to_writer(&mut file, &self.doc_lengths)
-            .map_err(|e| format!("Error writing to doc lengths file: {e}"))?;
+        bincode::serialize_into(&mut file, &self.article_lengths)
+            .map_err(|e| format!("Error writing to article lengths file: {e}"))?;
 
         Ok(())
     }
 
-    fn get_token_ids(&mut self, tokens: &Vec<String>) -> Vec<i32> {
+    fn get_token_ids(&mut self, tokens: &Vec<String>) -> Vec<usize> {
         let mut token_ids = Vec::new();
         for token in tokens {
             token_ids.push(self.get_token_id(token));
@@ -89,7 +83,7 @@ impl IndexBuilder {
         token_ids
     }
 
-    fn get_token_id(&mut self, token: &String) -> i32 {
+    fn get_token_id(&mut self, token: &String) -> usize {
         match self.token_to_id.get(token) {
             Some(token_id) => *token_id,
             None => {
@@ -102,8 +96,8 @@ impl IndexBuilder {
         }
     }
 
-    fn count_words(&self, token_ids: &Vec<i32>) -> HashMap<i32, i32> {
-        let mut word_counts = HashMap::<i32, i32>::new();
+    fn count_words(&self, token_ids: &Vec<usize>) -> HashMap<usize, usize> {
+        let mut word_counts = HashMap::<usize, usize>::new();
         for token_id in token_ids {
             let count = word_counts.entry(*token_id).or_insert(0);
             *count += 1;
@@ -111,7 +105,7 @@ impl IndexBuilder {
         word_counts
     }
 
-    fn update_inv_index(&mut self, article_id: i32, word_counts: &HashMap<i32, i32>) {
+    fn update_inv_index(&mut self, article_id: usize, word_counts: &HashMap<usize, usize>) {
         for (token_id, count) in word_counts {
             let token_postings_list = self.inv_index.entry(*token_id).or_insert(Vec::new());
             token_postings_list.push((article_id, *count));
@@ -123,7 +117,7 @@ impl IndexBuilder {
         }
     }
 
-    fn update_inv_index_file(&mut self, token_id: i32) -> Result<(), String> {
+    fn update_inv_index_file(&mut self, token_id: usize) -> Result<(), String> {
         let subdir_path = Path::new(&self.index_path)
             .join("inv_index")
             .join(format!("{}", token_id / MAX_POSTINGS_LIST_DIRECTORY_SIZE));
@@ -160,26 +154,4 @@ impl IndexBuilder {
 
         Ok(())
     }
-}
-
-fn tokenize(text: &String) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut start = 0;
-    let text = text.to_lowercase().replace(|c: char| !c.is_ascii(), ""); // non-ascii chars were making things wonky
-    let stemmer = Stemmer::create(rust_stemmers::Algorithm::English);
-
-    for (i, c) in text.chars().enumerate() {
-        if !c.is_alphanumeric() {
-            if start != i {
-                tokens.push(stemmer.stem(&text[start..i]).to_string());
-            }
-            start = i + 1;
-        }
-    }
-
-    if start != text.len() {
-        tokens.push(stemmer.stem(&text[start..text.len()]).to_string());
-    }
-
-    tokens
 }

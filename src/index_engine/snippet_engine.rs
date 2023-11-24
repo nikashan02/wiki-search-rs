@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use super::index_engine::Article;
+use crate::common::{Article, MAX_ARTICLE_DIR_SIZE};
 
-pub async fn insert_article(article: &Article, index_path: &String) -> Result<(), String> {
-    let subdir = Path::new(index_path).join(format!("articles/{}", article.id / 1000));
+pub fn insert_article(article: &Article, index_path: &String) -> Result<(), String> {
+    let subdir =
+        Path::new(index_path).join(format!("articles/{}", article.id / MAX_ARTICLE_DIR_SIZE));
     std::fs::create_dir_all(&subdir).map_err(|e| format!("Error creating directory: {e}"))?;
 
     let article_path = subdir.join(format!("article_{}.json", article.id.to_string()));

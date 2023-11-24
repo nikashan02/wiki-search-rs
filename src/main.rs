@@ -1,4 +1,6 @@
-pub mod index_engine;
+mod common;
+mod index_engine;
+mod query;
 
 use clap::Parser;
 
@@ -15,6 +17,8 @@ struct Args {
     wiki_dump_path: Option<String>,
     #[arg(short, long)]
     index_path: String,
+    #[arg(short, long, default_value_t = 10)]
+    num_max_results: usize,
 }
 
 #[tokio::main]
@@ -29,7 +33,7 @@ async fn main() {
         }
         let wiki_dump_path = wiki_dump_path.unwrap();
 
-        let index_path = args.index_path;
+        let index_path = args.index_path.clone();
 
         match build_index(&wiki_dump_path, &index_path).await {
             Ok(num_articles) => {
@@ -37,6 +41,30 @@ async fn main() {
             }
             Err(err) => {
                 println!("Error building index: {}", err);
+            }
+        }
+    }
+
+    if args.search.is_some() {
+        let query = args.search.unwrap();
+        let index_path = args.index_path.clone();
+        let num_max_results = args.num_max_results;
+
+        match query::get_query_results(&query, num_max_results, &index_path) {
+            Ok(query_results) => {
+                println!("Query results for \"{}\":\n", query);
+                for query_result in query_results {
+                    println!(
+                        "Title: {}\nArticle ID: {}\nScore: {}\nSnippet: {}\n",
+                        query_result.title,
+                        query_result.article_id,
+                        query_result.score,
+                        query_result.snippet
+                    );
+                }
+            }
+            Err(err) => {
+                println!("Error querying index: {}", err);
             }
         }
     }

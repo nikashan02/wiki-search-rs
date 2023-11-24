@@ -1,43 +1,22 @@
 use std::sync::Arc;
 
 use bzip2::read::MultiBzDecoder;
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use xml::reader::{EventReader, XmlEvent};
 
+use crate::common::Article;
+
 use super::{index_builder::IndexBuilder, snippet_engine};
 
-pub const QUERY_RETRY_LIMIT: i8 = 10;
 const MAX_TASKS: usize = 50;
-// Limit to the first 1000 articles for now... :/
-const MAX_ARTICLES: usize = 1000;
+// Limit to the first 10000 articles for now... :/
+const MAX_ARTICLES: usize = 10000;
 
 enum Tag {
     Title,
     Id,
     Text,
     Other,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Article {
-    pub id: i32,
-    pub title: String,
-    pub text: String,
-}
-
-impl Article {
-    fn new() -> Self {
-        Article {
-            title: String::new(),
-            id: i32::MAX,
-            text: String::new(),
-        }
-    }
-
-    fn parsed_id(&self) -> bool {
-        self.id != i32::MAX
-    }
 }
 
 pub async fn build_index(wiki_dump_path: &String, index_path: &String) -> Result<usize, String> {
@@ -114,7 +93,7 @@ async fn parse_dump(
                 }
                 Tag::Id => {
                     if !cur_article.parsed_id() {
-                        cur_article.id = chars.parse::<i32>().unwrap();
+                        cur_article.id = chars.parse::<usize>().unwrap();
                     }
                 }
                 Tag::Text => {
@@ -138,8 +117,6 @@ async fn parse_dump(
         }
     }
 
-    println!("Indexed {} articles", article_count);
-
     index_builder
         .lock()
         .await
@@ -147,23 +124,17 @@ async fn parse_dump(
         .await
         .map_err(|e| format!("Error writing lexicon: {}", e))?;
 
-    println!("Wrote lexicon");
+    index_builder
+        .lock()
+        .await
+        .write_article_lengths()
+        .map_err(|e| format!("Error writing article lengths: {}", e))?;
 
     index_builder
         .lock()
         .await
         .update_all_inv_index_files()
         .map_err(|e| format!("Error updating inverted index files: {}", e))?;
-
-    println!("Wrote inverted index files");
-
-    index_builder
-        .lock()
-        .await
-        .write_doc_lengths()
-        .map_err(|e| format!("Error writing doc lengths: {}", e))?;
-
-    println!("Wrote doc lengths");
 
     Ok(article_count)
 }
@@ -174,7 +145,6 @@ async fn index_article(
     index_builder: Arc<Mutex<IndexBuilder>>,
 ) -> Result<(), String> {
     snippet_engine::insert_article(&article, &index_path)
-        .await
         .map_err(|e| format!("Error inserting article: {e}"))?;
 
     index_builder.lock().await.build_index(&article);
