@@ -1,4 +1,5 @@
-*.bz2
 .vscode
+.DS_Store
+*.bz2
 target/
 wiki_index/
