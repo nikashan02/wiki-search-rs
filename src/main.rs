@@ -55,11 +55,12 @@ async fn main() {
                 println!("Query results for \"{}\":\n", query);
                 for query_result in query_results {
                     println!(
-                        "Title: {}\nArticle ID: {}\nScore: {}\nSnippet: {}\n",
+                        "Title: {}\nArticle ID: {}\nScore: {}\nSnippet: {}\nLink: https://en.wikipedia.org/?curid={}\n",
                         query_result.title,
                         query_result.article_id,
                         query_result.score,
-                        query_result.snippet
+                        query_result.snippet,
+                        query_result.article_id,
                     );
                 }
             }
